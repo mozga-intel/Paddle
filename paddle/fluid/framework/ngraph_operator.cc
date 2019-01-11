@@ -302,21 +302,24 @@ void NgraphEngine::GetNgInputShape(std::shared_ptr<OperatorBase> op) {
 }
 
 void NgraphEngine::BuildNgNodes() {
-  for (auto& var_name : var_out_) {
-    if (var_node_map_->find(var_name) == var_node_map_->end()) {
-      auto* var = scope_.FindVar(var_name);
-      if (var && var->IsType<LoDTensor>()) {
-        auto* tensor_pd = GetLoDTensorOrSelectedRowsValueFromVar(*var);
-        auto& ddim = tensor_pd->dims();
-        auto ng_shape = Ddim2Shape(ddim);
-        auto ng_type = var_type_map_.at(var_name);
-        auto prm =
-            std::make_shared<ngraph::op::Parameter>(ng_type, ng_shape, true);
-        (*var_node_map_)[var_name] = prm;
+  for (auto& op : fused_ops_) {
+    for (auto& var_name_item : op->Outputs()) {
+      for (auto& var_name : var_name_item.second) {
+        if (var_node_map_->find(var_name) == var_node_map_->end()) {
+          auto* var = scope_.FindVar(var_name);
+          if (var && var->IsType<LoDTensor>()) {
+            auto* tensor_pd = GetLoDTensorOrSelectedRowsValueFromVar(*var);
+            auto& ddim = tensor_pd->dims();
+            auto ng_shape = Ddim2Shape(ddim);
+            auto ng_type = var_type_map_.at(var_name);
+            auto prm = std::make_shared<ngraph::op::Parameter>(ng_type,
+                                                               ng_shape, true);
+            (*var_node_map_)[var_name] = prm;
+          }
+        }
       }
     }
   }
-
   paddle::framework::NgraphBridge ngb(var_node_map_);
   for (auto& op : fused_ops_) {
     ngb.BuildNgNode(op);
@@ -441,6 +444,39 @@ std::shared_ptr<std::string> NgraphEngine::GetCacheKey() {
       }
     }
   }
+  for (const auto& op : fused_ops_) {
+    auto op_attrs = AttrReader(op->Attrs());
+    for (const auto& attr : op->Attrs()) {
+      auto st_attr = attr.first;
+      auto nd_attr = attr.second;
+      if (nd_attr.type() == typeid(int)) {
+        auto v = op_attrs.Get<int>(st_attr);
+        *cache_key += std::to_string(v);
+      }
+      if (nd_attr.type() == typeid(float)) {
+        auto v = op_attrs.Get<float>(st_attr);
+        *cache_key += std::to_string(v);
+      }
+      if (nd_attr.type() == typeid(std::string)) {
+        auto v = op_attrs.Get<std::string>(st_attr);
+        *cache_key += v;
+      }
+      if (nd_attr.type() == typeid(std::vector<int>)) {
+        auto v = op_attrs.Get<std::vector<int>>(st_attr);
+        for (const auto& it : v) {
+          *cache_key += std::to_string(it);
+        }
+      }
+      if (nd_attr.type() == typeid(bool)) {
+        bool v = op_attrs.Get<bool>(st_attr);
+        *cache_key += std::to_string(v);
+      }
+      if (nd_attr.type() == typeid(int64_t)) {
+        auto v = op_attrs.Get<int64_t>(st_attr);
+        *cache_key += std::to_string(v);
+      }
+    }
+  }
   return cache_key;
 }
 
@@ -524,6 +560,9 @@ void NgraphEngine::Run(const Scope& scope, const platform::Place& place) const {
       } else if (ng_type == ngraph::element::i64) {
         auto pd_arr = tensor_pd->mutable_data<int64_t>(place);
         to = backend_->create_tensor(ngraph::element::i64, sp, pd_arr);
+      } else if (ng_type == ngraph::element::i32) {
+        auto pd_arr = tensor_pd->mutable_data<int32_t>(place);
+        to = backend_->create_tensor(ngraph::element::i32, sp, pd_arr);
       } else if (ng_type == ngraph::element::f64) {
         auto pd_arr = tensor_pd->mutable_data<double>(place);
         to = backend_->create_tensor(ngraph::element::f64, sp, pd_arr);

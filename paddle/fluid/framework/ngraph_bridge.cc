@@ -31,6 +31,9 @@ std::map<std::string,
                             std::shared_ptr<std::unordered_map<
                                 std::string, std::shared_ptr<ngraph::Node>>>)>>
     NgraphBridge::NG_NODE_MAP = {
+        {"cross_entropy", paddle::operators::ngraphs::BuildCrossEntropyNode},
+        {"cross_entropy_grad",
+         paddle::operators::ngraphs::BuildCrossEntropyGradNode},
         {"fill_constant", paddle::operators::ngraphs::BuildFillConstantNode},
         {"mean", paddle::operators::ngraphs::BuildMeanNode},
         {"mean_grad", paddle::operators::ngraphs::BuildMeanGradNode},
