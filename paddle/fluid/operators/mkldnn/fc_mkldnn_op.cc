@@ -1,10 +1,10 @@
-/* Copyright (c) 2018 PaddlePaddle Authors. All Rights Reserved.
+/* Copyright (c) 2020 PaddlePaddle Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-   http://www.apache.org/licenses/LICENSE-2.0
+    http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -14,245 +14,297 @@ limitations under the License. */
 
 #include <mkldnn/include/mkldnn_types.h>
 #include <memory>
+#include "mkldnn.hpp"
+#include "paddle/fluid/framework/op_registry.h"
 #include "paddle/fluid/framework/tensor.h"
 #include "paddle/fluid/operators/fc_op.h"
 #include "paddle/fluid/operators/math/blas.h"
 #include "paddle/fluid/platform/device_context.h"
 #include "paddle/fluid/platform/mkldnn_helper.h"
 #include "paddle/fluid/platform/variant.h"
-
 namespace paddle {
 namespace operators {
-
-using dnnl::memory;
-using dnnl::primitive;
-// using dnnl::reorder;
-using platform::to_void_cast;
-using Tensor = framework::Tensor;
-using framework::DataLayout;
-// // using dnnl::stream;
-using platform::GetMKLDNNFormat;
 using framework::DataLayout;
 using framework::Tensor;
 using framework::LoDTensor;
 using framework::DDim;
 using framework::ExecutionContext;
 using platform::MKLDNNDeviceContext;
-/*using platform::to_void_cast;
+using platform::to_void_cast;
 using platform::GetMKLDNNFormat;
 using mkldnn::memory;
-using mkldnn::inner_product_forward;
+using mkldnn::primitive;
 using mkldnn::stream;
-using mkldnn::prop_kind;*/
+using mkldnn::prop_kind;
+using dnnl::memory;
+using dnnl::primitive;
+using platform::to_void_cast;
+using framework::DataLayout;
+using platform::GetMKLDNNFormat;
 using platform::MKLDNNGetDataType;
+using platform::MKLDNNDeviceContext;
+using framework::ExecutionContext;
+using Tensor = framework::Tensor;
+// Get row matrix shape from a vector shape. If the rank of x_dim > 1, the
+// original x_dim is returned.
+static framework::DDim RowMatrixDimsFromVector(const framework::DDim& x_dim) {
+  return x_dim.size() > 1 ? x_dim : framework::make_ddim({1, x_dim[0]});
+}
 
-template <typename T_in, typename T_w, typename T_out>
-class FCPrimitiveFactory {
- public:
-  explicit FCPrimitiveFactory(const mkldnn::engine& engine) : engine_(engine) {}
-
-  static framework::DDim RowMatrixDimsFromVector(const framework::DDim& x_dim) {
-    return x_dim.size() > 1 ? x_dim : framework::make_ddim({1, x_dim[0]});
-  }
-
-  static framework::DDim ColumnMatrixDimsFromVector(
-      const framework::DDim& y_dim) {
-    return y_dim.size() > 1 ? y_dim : framework::make_ddim({1, y_dim[0]});
-  }
-
-  template <typename T>
-  dnnl::memory CreateMemory(const memory::dims& dims,
-                            const memory::dims& strides, const T* data) {
-    auto md = memory::desc(dims, MKLDNNGetDataType<T>(), strides);
-    return dnnl::memory(md, engine_, to_void_cast(data));
-  }
-  /*
-  memory::dims InitMD() {
-    memory::dims init_dims;
-    switch (tag) {
-      case tag::ab:
-        init_dims = {};
-        break;
-      case tag::ba:
-        init_dims = {};
-        break;
-      case tag::abc:
-        init_dims = {};
-        break;
-      case tag::acb:
-        init_dims = {};
-        break;
-      default:
-        throw std::invalid_argument("Tag doesn't support custom operator");
+// Get column matrix shape from a vector shape. If the ran of y_dim > 1, the
+// original y_dim is returned.
+static framework::DDim ColumnMatrixDimsFromVector(
+    const framework::DDim& y_dim) {
+  return y_dim.size() > 1 ? y_dim : framework::make_ddim({y_dim[0], 1});
+}
+/*
+#define FWD(...) ::std::forward<decltype>(__VARGS__)>(__VA__ARGS__)
+template <typename FThen>
+auto then(FThen&& then) {
+  return ::node {[
+      parent = std::move(*this),
+      f_then = FWD(f_then)
+  ]() mutable->decltype(auto) {
+      return f_then(static_cast<F&>(parent)());
     }
-    return tag;
-  } */
-  void ExecuteFcPrimitive(const Tensor* input, const Tensor* weights,
-                          const Tensor* bias, Tensor* output,
-                          const ExecutionContext& ctx) {
-    auto& dev_ctx =
-        ctx.template device_context<platform::MKLDNNDeviceContext>();
-    const auto& engine = dev_ctx.GetEngine();
-    auto weight_dim = weights->dims();
-    auto input_dims = input->dims();
-    auto input_descriptor = math::CreateMatrixDescriptor(
-        RowMatrixDimsFromVector(input_dims), 0, false);
-    auto weight_descriptor = math::CreateMatrixDescriptor(
-        ColumnMatrixDimsFromVector(weight_dim), 0, false);
+  }
+}
 
-    std::cout << "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD \n ";
-    // memory dims DNNL
-    const memory::dim MB =
-        input_descriptor.batch_size_ || weight_descriptor.batch_size_
-            ? std::max(input_descriptor.batch_size_,
-                       weight_descriptor.batch_size_)
-            : 1;
-    const memory::dim M = input_descriptor.height_;
-    const memory::dim K = input_descriptor.width_;
-    const memory::dim N = weight_descriptor.width_;
+template<typename >
+class FFcFactory {
+    struct Dim : D {
+        int e;
+        Dim(D & d, int w) : D(d), e(w) { }
+    };
+    struct Ve : V, ::std::vevtor<Dim> { }
+    }
+};
+*/
 
-    std::cout << MB << " " << M << " " << K << " " << N << std::endl;
-    // memory descriptor
-    memory::dims src_dim = {M, K};
-    memory::dims weights_dim = {K, N};
-    memory::dims bias_dim = {M, N};
-    memory::dims out_dim = {M, N};
-
-    // The Matmul Stride
-    memory::dims input_strides = {M * K, K, 1};
-    memory::dims weight_strides = {N * K, N, 1};
-    memory::dims bias_stirdes = {M * N, N, 1};
-    memory::dims output_strides = {M * N, N, 1};
-
-    std::cout << "1111111111111111111111111111\n";
-    auto x_memory_descriptor =
-        memory::desc(src_dim, memory::data_type::f32, memory::format_tag::ab);
-    auto w_memory_descriptor = memory::desc(weights_dim, memory::data_type::f32,
-                                            memory::format_tag::ab);
-    auto b_memory_descriptor =
-        memory::desc(bias_dim, memory::data_type::f32, memory::format_tag::ab);
-    auto d_memory_descriptor =
-        memory::desc(out_dim, memory::data_type::f32, memory::format_tag::ab);
-
-    auto x_dnnl_memory = dnnl::memory(x_memory_descriptor, engine,
-                                      to_void_cast(input->data<T_in>()));
-    auto w_dnnl_memory = dnnl::memory(w_memory_descriptor, engine,
-                                      to_void_cast(weights->data<T_w>()));
-    auto b_dnnl_memory = dnnl::memory(b_memory_descriptor, engine,
-                                      to_void_cast(bias->data<float>()));
-    auto d_dnnl_memory =
-        dnnl::memory(d_memory_descriptor, engine,
-                     to_void_cast(output->mutable_data<T_out>(ctx.GetPlace())));
-
-    // Create memory descriptori
-    auto matmul_d = dnnl::matmul::desc(x_memory_descriptor, w_memory_descriptor,
-                                       d_memory_descriptor);
-    auto matmul_pd = dnnl::matmul::primitive_desc(matmul_d, engine);
-    auto matmul_prim = dnnl::matmul(matmul_pd);
-    dnnl::stream astream(engine);
-    //   if (bias_) {
-    //matmul_prim.execute(astream, {{MKLDNN_ARG_SRC, x_dnnl_memory},
-    //                              {MKLDNN_ARG_WEIGHTS, w_dnnl_memory},
-    //                              {MKLDNN_ARG_BIAS, b_dnnl_memory},
-    //                              {MKLDNN_ARG_DST, d_dnnl_memory}});
-    //  } else {
-
-    //std::cout << "22222222222222222222222\n";
-     matmul_prim.execute(astream, {{MKLDNN_ARG_SRC, x_dnnl_memory},
-                                 {MKLDNN_ARG_WEIGHTS, w_dnnl_memory},
-                                 {MKLDNN_ARG_DST, d_dnnl_memory}});
-   //   }
-    astream.wait();
-
-    //std::cout << "33333333333333333333333\n";
-    //output->set_layout(DataLayout::kMKLDNN);
-    //output->set_format(GetMKLDNNFormat(d_dnnl_memory));
+template <typename XT, typename YT, typename OT>
+class FcFactory {
+ public:
+  void CreateAndExecute(const ExecutionContext& ctx) {
+    RecomputeOutputDims(ctx);
+    SetDNNLEngine(ctx);
+    CreateMemories(ctx);
+    CreatePrimitive(ctx);
+    Execute();
+    SetOutputFormat(ctx);
+    SetInitialized();
   }
 
  private:
-  const mkldnn::engine& engine_;
-  boost::optional<memory> bias_;
-  boost::optional<memory> input_;
-  boost::optional<memory> output_;
-  boost::optional<memory> weights_;
-};
+  struct MatMulDims {
+    const memory::dim BS, M, N, K;
+  };
 
-// Attempt to fetch cached primitive factory based on provided parameters
-// of input format, weight dimensions and output name.
-// If not cached, create a new one.
-template <typename T_in, typename T_w, typename T_out>
-static std::shared_ptr<FCPrimitiveFactory<T_in, T_w, T_out>>
-GetPrimitiveFactory(const MKLDNNDeviceContext& dev_ctx,
-                    const ExecutionContext& ctx, const Tensor* input,
-                    const Tensor* weights,
-                    const mkldnn::engine& mkldnn_engine) {
-  const std::string key = platform::CreateKey(
-      platform::ThreadIDasStr(), input->format(), input->dims()[0],
-      framework::vectorize<int>(weights->dims()), ctx.OutputName("Out"));
-
-  auto prim_creator =
-      std::static_pointer_cast<FCPrimitiveFactory<T_in, T_w, T_out>>(
-          dev_ctx.GetBlob(key));
-  if (prim_creator == nullptr) {
-    prim_creator =
-        std::make_shared<FCPrimitiveFactory<T_in, T_w, T_out>>(mkldnn_engine);
-    dev_ctx.SetBlob(key, prim_creator);
+  void RecomputeOutputDims(const ExecutionContext& ctx) {
+    auto input = ctx.Input<LoDTensor>("Input");
+    auto w = ctx.Input<Tensor>("W");
+    auto output = ctx.Output<LoDTensor>("Out");
+    int in_num_col_dims = ctx.Attr<int>("in_num_col_dims");
+    bool padding_weights = ctx.Attr<bool>("padding_weights");
+    PADDLE_ENFORCE_EQ(padding_weights, false,
+                      platform::errors::PermissionDenied(
+                          "Weight padding in fc can not be used in MKLDNN."));
+    std::vector<int64_t> output_dims;
+    FCOutputSize(input->dims(), w->dims(), output_dims, in_num_col_dims,
+                 padding_weights);
+    output->Resize(framework::make_ddim(output_dims));
+    output->set_lod(input->lod());
   }
 
-  return prim_creator;
+  void SetOutputFormat(const ExecutionContext& ctx) {
+    using platform::MKLDNNFormatForSize;
+    auto* out = ctx.Output<LoDTensor>("Out");
+    auto format =
+        MKLDNNFormatForSize(out->dims().size(), MKLDNNMemoryFormat::nchw);
+    out->set_format(format);
+    out->set_layout(DataLayout::kMKLDNN);
+  }
+
+  void SetDNNLEngine(const ExecutionContext& ctx) {
+    auto& dev_ctx =
+        ctx.template device_context<platform::MKLDNNDeviceContext>();
+    engine_ = dev_ctx.GetEngine();
+  }
+
+  MatMulDims GetMatmulDims(const ExecutionContext& ctx) {
+    auto mat_dim_x = math::CreateMatrixDescriptor(
+        RowMatrixDimsFromVector(ctx.Input<LoDTensor>("Input")->dims()), 0,
+        false);
+    auto mat_dim_y = math::CreateMatrixDescriptor(
+        ColumnMatrixDimsFromVector(ctx.Input<Tensor>("W")->dims()), 0, false);
+    const auto x_bs = mat_dim_x.batch_size_;
+    const auto y_bs = mat_dim_y.batch_size_;
+    PADDLE_ENFORCE_EQ(x_bs > 0 && y_bs > 0 && x_bs != y_bs, false,
+                      platform::errors::InvalidArgument(
+                          "If batch sizes of X and Y are positive,"
+                          "they have to be equal."));
+
+    memory::dim BS = x_bs || y_bs ? std::max(x_bs, y_bs) : 1;
+    memory::dim M = mat_dim_x.height_;
+    memory::dim N = mat_dim_y.width_;
+    memory::dim K = mat_dim_x.width_;
+
+    const auto x_dims =
+        framework::vectorize<int>(ctx.Input<LoDTensor>("Input")->dims());
+    if (x_dims.size() == 4) {
+      BS = 1;
+      M = x_dims[0];
+      K = x_dims[1] * x_dims[2] * x_dims[3];
+    }
+    return {BS, M, N, K};
+  }
+
+  void CreateMemories(const ExecutionContext& ctx) {
+    auto matmul_dims = GetMatmulDims(ctx);
+    auto BS = matmul_dims.BS;
+    auto M = matmul_dims.M;
+    auto N = matmul_dims.N;
+    auto K = matmul_dims.K;
+
+    typedef memory::dims dims;
+    dims x_dims = {BS, M, K};
+    dims y_dims = {BS, K, N};
+    dims b_dims = {1, 1, N};
+    dims out_dims = {BS, M, N};
+
+    auto x_md =
+        memory::desc(x_dims, memory::data_type::f32, memory::format_tag::abc);
+    auto w_md =
+        memory::desc(y_dims, memory::data_type::f32, memory::format_tag::abc);
+    auto o_md =
+        memory::desc(out_dims, memory::data_type::f32, memory::format_tag::abc);
+
+    x_mem_ = dnnl::memory(
+        x_md, engine_, to_void_cast(ctx.Input<LoDTensor>("Input")->data<XT>()));
+    y_mem_ = dnnl::memory(w_md, engine_,
+                          to_void_cast(ctx.Input<Tensor>("W")->data<XT>()));
+    auto* bias = ctx.Input<Tensor>("Bias");
+    if (bias) {
+      auto b_md =
+          memory::desc(b_dims, memory::data_type::f32, memory::format_tag::abc);
+      b_mem_ = dnnl::memory(
+          b_md, engine_, to_void_cast(ctx.Input<Tensor>("Bias")->data<XT>()));
+    }
+    out_mem_ = dnnl::memory(
+        o_md, engine_,
+        to_void_cast(
+            ctx.Output<LoDTensor>("Out")->mutable_data<OT>(ctx.GetPlace())));
+  }
+
+  void CreatePrimitive(const ExecutionContext& ctx) {
+    dnnl::primitive_attr attr;
+    dnnl::post_ops post_operations;
+
+    if (ctx.Attr<std::string>("activation_type") == "relu") {
+      constexpr float scale = 1.0f;
+      constexpr float negative_slope = 0.0f;
+      constexpr float placeholder = 1.0f;
+      post_operations.append_eltwise(scale, mkldnn::algorithm::eltwise_relu,
+                                     negative_slope, placeholder);
+      attr.set_post_ops(post_operations);
+    }
+    auto matmul_d = dnnl::matmul::desc(x_mem_.get_desc(), y_mem_.get_desc(),
+                                       out_mem_.get_desc());
+    if (b_mem_) {
+      matmul_d = dnnl::matmul::desc(x_mem_.get_desc(), y_mem_.get_desc(),
+                                    b_mem_.get_desc(), out_mem_.get_desc());
+    }
+    auto matmul_pd = dnnl::matmul::primitive_desc(matmul_d, attr, engine_);
+    matmul_prim_ = dnnl::matmul(matmul_pd);
+  }
+
+  void Execute() {
+    dnnl::stream stream(engine_);
+    if (b_mem_) {
+      matmul_prim_.execute(stream, {
+                                       {MKLDNN_ARG_SRC, x_mem_},
+                                       {MKLDNN_ARG_WEIGHTS, y_mem_},
+                                       {MKLDNN_ARG_BIAS, b_mem_},
+                                       {MKLDNN_ARG_DST, out_mem_},
+                                   });
+    } else {
+      matmul_prim_.execute(stream, {
+                                       {MKLDNN_ARG_SRC, x_mem_},
+                                       {MKLDNN_ARG_WEIGHTS, y_mem_},
+                                       {MKLDNN_ARG_DST, out_mem_},
+                                   });
+    }
+    stream.wait();
+  }
+
+  // If initialized, x memory should've been already initialized
+  bool IsInitialized() { return initialized_; }
+
+  void SetInitialized() { initialized_ = true; }
+
+ private:
+  dnnl::engine engine_;
+  dnnl::memory x_mem_;
+  dnnl::memory y_mem_;
+  dnnl::memory b_mem_;
+  dnnl::memory out_mem_;
+  dnnl::matmul matmul_prim_;
+  bool initialized_ = false;
+};
+
+template <typename XT, typename YT, typename OT>
+static std::shared_ptr<FcFactory<XT, YT, OT>> GetFcPrimitiveFactory(
+    const ExecutionContext& ctx) {
+  const auto x_dims =
+      framework::vectorize<int>(ctx.Input<LoDTensor>("Input")->dims());
+  const auto y_dims = framework::vectorize<int>(ctx.Input<Tensor>("W")->dims());
+  //  const auto b_dims =
+  ///      framework::vectorize<int>(ctx.Input<Tensor>("Bias")->dims());
+  const auto& out_name = ctx.OutputName("Out");
+  const auto& dev_ctx = ctx.template device_context<MKLDNNDeviceContext>();
+
+  const std::string key =
+      platform::CreateKey(platform::ThreadIDasStr(), x_dims, y_dims, out_name);
+
+  auto factory =
+      std::static_pointer_cast<FcFactory<XT, YT, OT>>(dev_ctx.GetBlob(key));
+  if (factory == nullptr) {
+    factory = std::make_shared<FcFactory<XT, YT, OT>>();
+    dev_ctx.SetBlob(key, factory);
+  }
+
+  return factory;
 }
 
+template <typename T>
+constexpr bool IsInt8() {
+  return std::is_same<T, int8_t>::value || std::is_same<T, uint8_t>::value;
+}
 // Choose appropriate primitive factory implementation based on inferred
 // output type (uint8, int8 or float).
-template <typename T_in, typename T_w>
-static void ExecuteFc(const MKLDNNDeviceContext& dev_ctx,
-                      const ExecutionContext& ctx, const Tensor* input,
-                      const Tensor* w, const Tensor* bias, Tensor* output,
-                      const mkldnn::engine& mkldnn_engine, bool fuse_relu,
-                      bool force_fp32_output) {
-  //  constexpr bool is_int8 =
-  //      std::is_same<T_in, int8_t>::value || std::is_same<T_in,
-  //      uint8_t>::value;
-  //  if (!is_int8 || force_fp32_output) {
-  GetPrimitiveFactory<T_in, T_w, float>(dev_ctx, ctx, input, w, mkldnn_engine)
-      ->ExecuteFcPrimitive(input, w, bias, output, ctx);
-  //  } else if (fuse_relu) {
-  //    GetPrimitiveFactory<T_in, T_w, uint8_t>(dev_ctx, ctx, input, w,
-  //                                            mkldnn_engine)
-  //        ->ExecuteFcPrimitive(input, w, bias, output, ctx);
-  //  } else {
-  //   GetPrimitiveFactory<T_in, T_w, int8_t>(dev_ctx, ctx, input, w,
-  //                                          mkldnn_engine)
-  //       ->ExecuteFcPrimitive(input, w, bias, output, ctx);
-  // }
+template <typename XT, typename YT>
+static void ExecuteFc(const ExecutionContext& ctx) {
+  constexpr bool is_int8 = IsInt8<XT>();
+  const bool force_fp32_output = ctx.Attr<bool>("force_fp32_output");
+  constexpr bool fuse_relu = false;  // TODO(intel): Enable eltwise fuses
+  if (!is_int8 || force_fp32_output) {
+    GetFcPrimitiveFactory<XT, YT, float>(ctx)->CreateAndExecute(ctx);
+  } else if (fuse_relu) {
+    GetFcPrimitiveFactory<XT, YT, uint8_t>(ctx)->CreateAndExecute(ctx);
+  } else {
+    GetFcPrimitiveFactory<XT, YT, int8_t>(ctx)->CreateAndExecute(ctx);
+  }
 }
 
-template <typename T_in, typename T_w>
-class FCMKLDNNOpKernel : public framework::OpKernel<T_in> {
+template <typename T>
+class FCMKLDNNOpKernel : public framework::OpKernel<T> {
  public:
-  void Compute(const paddle::framework::ExecutionContext& ctx) const override {
-    PADDLE_ENFORCE_EQ(
-        platform::is_cpu_place(ctx.GetPlace()), true,
-        platform::errors::PreconditionNotMet("FC MKL-DNN must use CPUPlace."));
-    auto& dev_ctx = ctx.template device_context<MKLDNNDeviceContext>();
-    const auto& mkldnn_engine = dev_ctx.GetEngine();
-
-    auto input = ctx.Input<Tensor>("Input");
-    auto w = ctx.Input<Tensor>("W");
-    auto bias = ctx.Input<Tensor>("Bias");
-    auto output = ctx.Output<Tensor>("Out");
-
-    bool fuse_relu = ctx.Attr<std::string>("activation_type") == "relu";
-    bool force_fp32_output = ctx.Attr<bool>("force_fp32_output");
-
-    ExecuteFc<T_in, T_w>(dev_ctx, ctx, input, w, bias, output, mkldnn_engine,
-                         fuse_relu, force_fp32_output);
-
-    output->set_layout(DataLayout::kMKLDNN);
+  void Compute(const framework::ExecutionContext& ctx) const override {
+    ExecuteFc<T, T>(ctx);
   }
 };
 }  // namespace operators
 }  // namespace paddle
+namespace ops = paddle::operators;
 
 // Weights of FC are by default stored using fp32, template argument of weight
 // data type implies their destination data type. (What's eventually going to
@@ -260,12 +312,12 @@ class FCMKLDNNOpKernel : public framework::OpKernel<T_in> {
 namespace ops = paddle::operators;
 REGISTER_OP_KERNEL_WITH_CUSTOM_TYPE(fc, MKLDNN, ::paddle::platform::CPUPlace,
                                     FP32, ops::kFCMKLDNNFP32,
-                                    ops::FCMKLDNNOpKernel<float, float>);
+                                    ops::FCMKLDNNOpKernel<float>);
 
 REGISTER_OP_KERNEL_WITH_CUSTOM_TYPE(fc, MKLDNN, ::paddle::platform::CPUPlace,
                                     U8, ops::kFCMKLDNNINT8,
-                                    ops::FCMKLDNNOpKernel<uint8_t, int8_t>);
+                                    ops::FCMKLDNNOpKernel<uint8_t>);
 
 REGISTER_OP_KERNEL_WITH_CUSTOM_TYPE(fc, MKLDNN, ::paddle::platform::CPUPlace,
                                     S8, ops::kFCMKLDNNINT8,
-                                    ops::FCMKLDNNOpKernel<int8_t, int8_t>);
+                                    ops::FCMKLDNNOpKernel<int8_t>);
