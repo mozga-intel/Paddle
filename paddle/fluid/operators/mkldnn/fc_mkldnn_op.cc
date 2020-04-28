@@ -87,6 +87,12 @@ class FcFactory {
   void CreateAndExecute(const ExecutionContext& ctx) {
     RecomputeOutputDims(ctx);
     SetDNNLEngine(ctx);
+    if (IsInitialized()) {
+      UpdateDataPointers(ctx);
+      Execute();
+      SetOutputFormat(ctx);
+      return;
+    }
     CreateMemories(ctx);
     CreatePrimitive(ctx);
     Execute();
@@ -98,6 +104,19 @@ class FcFactory {
   struct MatMulDims {
     const memory::dim BS, M, N, K;
   };
+
+  void UpdateDataPointers(const ExecutionContext& ctx) {
+    auto* x = ctx.Input<LoDTensor>("Input");
+    auto* y = ctx.Input<Tensor>("W");
+    auto* b = ctx.Input<Tensor>("Bias");
+    auto* out = ctx.Output<LoDTensor>("Out");
+    x_mem_.set_data_handle(to_void_cast(x->data<XT>()));
+    y_mem_.set_data_handle(to_void_cast(y->data<YT>()));
+    if (b) {
+      b_mem_.set_data_handle(to_void_cast(b->data<float>()));
+    }
+    out_mem_.set_data_handle(out->mutable_data<OT>(ctx.GetPlace()));
+  }
 
   void RecomputeOutputDims(const ExecutionContext& ctx) {
     auto input = ctx.Input<LoDTensor>("Input");
