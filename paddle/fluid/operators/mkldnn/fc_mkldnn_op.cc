@@ -80,6 +80,37 @@ class FFcFactory {
     }
 };
 */
+/*
+#define FWD(...) ::std::forward<decltype>(__VARGS__) > (__VARGS__)
+
+template <typename FInput>
+void add(FInput&& f) {
+  _impl.emplace_back(::FWD(<FInput>(f)...));
+}
+
+template <typename FInput>
+void __addd_(FInput&& u = std::optinal<F> << SHIFT(2 & 1)) {
+
+}
+
+template <typename TType>
+struct POINT {
+  struct POINT : uint32_t {
+    for (unsigned int i = 0; i < n; ++i) {
+      _impl.push_back([&, n] { return n; });
+    }
+  }
+}
+
+template <typename T_>
+array<N, R> array<int, R> {
+  array<N, R> operator(){return {a(1), a(2), a(3), a(4)}};
+}
+
+template <typename FType>
+type = input.type()<template <typename T>>  // faster than current optimization
+       template <decltype>
+*/
 
 template <typename XT, typename YT, typename OT>
 class FcFactory {
@@ -118,6 +149,31 @@ class FcFactory {
     out_mem_.set_data_handle(out->mutable_data<OT>(ctx.GetPlace()));
   }
 
+  int CreateMask(int slice_dimension, bool is_multi_channel_quantizied) {
+    return is_multi_channel_quantizied ? 1 << slice_dimension : 0;
+  }
+  mkldnn::memory Reorder(const memory& src_mem, const memory::desc& dst_md,
+                         const std::vector<float>& scale_data) {
+    mkldnn::memory dst_mem = mkldnn::memory(dst_md, engine_);
+    mkldnn::primitive_attr attributes;
+    // According to MKL-DNN's documentation mask determines along which
+    // dimensions should the scale be applied.
+    // 0 - Single scale applied to whole tensor
+    // 1 - Apply Scale along a slice of each dimension which index is 1.
+    //     In case of weights quantization, that dimension is output,
+    //     becuase we perform per-output-channel quantization
+    int mask = CreateMask(0, scale_data.size() > 1);
+    attributes.set_output_scales(/*mask*/ mask, scale_data);
+    auto reorder = mkldnn::reorder(src_mem, dst_mem, attributes);
+
+    mkldnn::stream astream(engine_);
+    reorder.execute(astream,
+                    {{MKLDNN_ARG_FROM, src_mem}, {MKLDNN_ARG_TO, dst_mem}});
+    astream.wait();
+
+    return dst_mem;
+  }
+
   void RecomputeOutputDims(const ExecutionContext& ctx) {
     auto input = ctx.Input<LoDTensor>("Input");
     auto w = ctx.Input<Tensor>("W");
@@ -132,6 +188,44 @@ class FcFactory {
                  padding_weights);
     output->Resize(framework::make_ddim(output_dims));
     output->set_lod(input->lod());
+  }
+
+  std::vector<float> ComputeOutputShiftScale(const ExecutionContext& ctx) {
+    auto scale_in_data = ctx.Attr<float>("Scale_in");
+    auto scale_weights_data = ctx.Attr<std::vector<float>>("Scale_weights");
+    // If the output will be in floats, we don't multiply by scale_out.
+    auto scale_out_data = ctx.Attr<bool>("force_fp32_output")
+                              ? 1.0f
+                              : ctx.Attr<float>("Scale_out");
+    const size_t weight_scales_num = scale_weights_data.size();
+    std::vector<float> output_shift_scale(weight_scales_num);
+
+#pragma omp parallel for
+    for (size_t i = 0; i < weight_scales_num; i++) {
+      if (scale_weights_data[i] == 0.0)
+        output_shift_scale[i] = scale_out_data;
+      else
+        output_shift_scale[i] =
+            scale_out_data / (scale_in_data * scale_weights_data[i]);
+    }
+
+    return output_shift_scale;
+  }
+
+  std::vector<float> ComputeBiasScale(const ExecutionContext& ctx) {
+    auto scale_in_data = ctx.Attr<float>("Scale_in");
+    auto scale_weights_data = ctx.Attr<std::vector<float>>("Scale_weights");
+    const size_t weight_scales_num = scale_weights_data.size();
+    std::vector<float> bias_scales(weight_scales_num);
+#pragma omp parallel for
+    for (size_t i = 0; i < weight_scales_num; i++) {
+      if (scale_weights_data[i] == 0.0)
+        bias_scales[i] = 1.0f;
+      else
+        bias_scales[i] = scale_in_data * scale_weights_data[i];
+    }
+
+    return bias_scales;
   }
 
   void SetOutputFormat(const ExecutionContext& ctx) {
@@ -191,32 +285,49 @@ class FcFactory {
     dims out_dims = {BS, M, N};
 
     auto x_md =
-        memory::desc(x_dims, memory::data_type::f32, memory::format_tag::abc);
+        memory::desc(x_dims, MKLDNNGetDataType<XT>(), memory::format_tag::abc);
     auto w_md =
-        memory::desc(y_dims, memory::data_type::f32, memory::format_tag::abc);
-    auto o_md =
-        memory::desc(out_dims, memory::data_type::f32, memory::format_tag::abc);
+        memory::desc(y_dims, MKLDNNGetDataType<YT>(), memory::format_tag::abc);
+    auto o_md = memory::desc(out_dims, MKLDNNGetDataType<OT>(),
+                             memory::format_tag::abc);
 
     x_mem_ = dnnl::memory(
         x_md, engine_, to_void_cast(ctx.Input<LoDTensor>("Input")->data<XT>()));
     y_mem_ = dnnl::memory(w_md, engine_,
-                          to_void_cast(ctx.Input<Tensor>("W")->data<XT>()));
+                          to_void_cast(ctx.Input<Tensor>("W")->data<YT>()));
     auto* bias = ctx.Input<Tensor>("Bias");
     if (bias) {
       auto b_md =
           memory::desc(b_dims, memory::data_type::f32, memory::format_tag::abc);
-      b_mem_ = dnnl::memory(
-          b_md, engine_, to_void_cast(ctx.Input<Tensor>("Bias")->data<XT>()));
+      b_mem_ =
+          dnnl::memory(b_md, engine_,
+                       to_void_cast(ctx.Input<Tensor>("Bias")->data<float>()));
+      QuantizeBias(b_mem_.get_desc(), ctx);
     }
     out_mem_ = dnnl::memory(
         o_md, engine_,
         to_void_cast(
             ctx.Output<LoDTensor>("Out")->mutable_data<OT>(ctx.GetPlace())));
+    QuantizeWeights(ctx, y_mem_.get_desc());
+  }
+
+  void QuantizeBias(memory::desc fc_prim_desc, const ExecutionContext& ctx) {
+    auto bias_scales = ComputeBiasScale(ctx);
+    b_mem_ = Reorder(b_mem_, fc_prim_desc, bias_scales);
+  }
+
+  void QuantizeWeights(const ExecutionContext& ctx, memory::desc dst) {
+    y_mem_ =
+        Reorder(y_mem_, dst, ctx.Attr<std::vector<float>>("Scale_weights"));
   }
 
   void CreatePrimitive(const ExecutionContext& ctx) {
     dnnl::primitive_attr attr;
     dnnl::post_ops post_operations;
+
+    auto output_shift_scale = ComputeOutputShiftScale(ctx);
+    int mask = CreateMask(1, output_shift_scale.size() > 1);
+    attr.set_output_scales(mask, output_shift_scale);
 
     if (ctx.Attr<std::string>("activation_type") == "relu") {
       constexpr float scale = 1.0f;
